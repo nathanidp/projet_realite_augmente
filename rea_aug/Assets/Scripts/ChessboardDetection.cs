@@ -1,31 +1,25 @@
-using System.Collections;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using UnityEngine;
-using System;
 using System.Drawing;
-using System.Windows.Forms;
-using Emgu.Util;
 using Emgu.CV;
-using Emgu.CV.Cuda;
-using Emgu.CV.Face;
 using Emgu.CV.Util;
 using Emgu.CV.CvEnum;
 using Emgu.CV.Structure;
-
 
 public class ChessboardDetection : MonoBehaviour
 {
 	public static WebCamTexture webcamTexture;
 	private static Texture2D displayTexture;
+
+	public GameObject screen;
+	public GameObject virtual_chessboard;
+
+	private FlipType flip = FlipType.Horizontal;
+	private Size patternSize = new Size(7, 4);
+
 	private Color32[] data;
 	private byte[] bytes;
 	private byte[] grayBytes;
-	private FlipType flip = FlipType.Horizontal;
-	private Size patternSize = new Size(7, 4);
-	private MCvTermCriteria criteria = new MCvTermCriteria(100, 1e-5);
-	public GameObject screen;
-	public GameObject virtual_chessboard;
 
 	void Start()
 	{
@@ -47,7 +41,6 @@ public class ChessboardDetection : MonoBehaviour
 				data = new Color32[webcamTexture.width * webcamTexture.height];
 
 			webcamTexture.GetPixels32(data);
-			//data = webcamTexture.GetPixels32(0);
 
 			if (bytes == null || bytes.Length != data.Length * 3)
 				bytes = new byte[data.Length * 3];
@@ -65,12 +58,9 @@ public class ChessboardDetection : MonoBehaviour
 
 			CvInvoke.CvtColor(currentWebcamMat, resultMat, ColorConversion.Bgra2Bgr);
 			CvInvoke.CvtColor(resultMat, grayMat, ColorConversion.Bgra2Gray);
-			//VectorOfPoint cornerPoints = DetectCheckerboard(grayMat);
-
 
 			if (Input.GetKey(KeyCode.D))
-				FindCameraProperties(grayMat, resultMat); //DetectCheckerboard(grayMat, resultMat); 
-
+				FindCameraProperties(grayMat, resultMat); //FindCameraProperties(grayMat, resultMat);
 
 			handle.Free();
 			resultHandle.Free();
@@ -78,33 +68,70 @@ public class ChessboardDetection : MonoBehaviour
 
 			if (flip != FlipType.None)
 				CvInvoke.Flip(resultMat, resultMat, flip);
-			if (displayTexture == null || displayTexture.width != webcamTexture.width ||
-				displayTexture.height != webcamTexture.height)
-			{
+			if (displayTexture == null || displayTexture.width != webcamTexture.width || displayTexture.height != webcamTexture.height)
 				displayTexture = new Texture2D(webcamTexture.width, webcamTexture.height, TextureFormat.RGB24, false);
-			}
 			displayTexture.LoadRawTextureData(bytes);
 			displayTexture.Apply();
 		}
 
 		if (displayTexture != null)
-		{
 			screen.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_MainTex", displayTexture);
+	}
+
+	private bool FindChessboardCorners(Mat detectImage, Mat drawImage, PointF[] corners)
+	{
+		GCHandle handle = GCHandle.Alloc(corners, GCHandleType.Pinned);
+		bool patternFound = false;
+		Matrix<float> pointMatrix = new Matrix<float>(corners.Length, 1, 2, handle.AddrOfPinnedObject(), 2 * sizeof(float));
+		patternFound = CvInvoke.FindChessboardCorners(detectImage, patternSize, pointMatrix);
+		if (patternFound)
+			CvInvoke.DrawChessboardCorners(drawImage, patternSize, pointMatrix, patternFound);
+		handle.Free();
+		return patternFound;
+	}
+
+	private void BuildVirtualCorners(MCvPoint3D32f[] corners, float scale)
+	{
+		if (corners != null)
+		{
+			for (int ix = 0; ix < patternSize.Width; ix++)
+			{
+				for (int iy = 0; iy < patternSize.Height; iy++)
+					corners[iy * patternSize.Width + ix] = new MCvPoint3D32f(iy * scale, ix * scale, 0);
+			}
 		}
 	}
 
-	private void DetectCheckerboard(Mat detectImage, Mat drawImage)
+	private void GetCalibrationMatrices(Matrix<float> calibrationMatrix, Matrix<float> calibrationDistortionCoefficients)
 	{
-		Matrix<float> cornerPoints = new Matrix<float>(patternSize);
-		bool result = CvInvoke.FindChessboardCorners(detectImage, patternSize, cornerPoints);
+		//   1.2306403943428504e+03 0. 960. 
+		//   0. 1.2306403943428504e+03 540. 
+		//   0. 0. 1.
+		calibrationMatrix[0, 0] = 1230;
+		calibrationMatrix[0, 1] = 0.0f;
+		calibrationMatrix[0, 2] = 960;
 
-		if (result == false)
-			return;
-		CvInvoke.DrawChessboardCorners(drawImage, patternSize, cornerPoints, true);
+		calibrationMatrix[1, 0] = 0.0f;
+		calibrationMatrix[1, 1] = 1230;
+		calibrationMatrix[1, 2] = 540;
+
+		calibrationMatrix[2, 0] = 0.0f;
+		calibrationMatrix[2, 1] = 0.0f;
+		calibrationMatrix[2, 2] = 1;
+
+		// 1.9920531921963049e-02 3.2143454945024297e-02 0. 0. -2.2585645769105978e-01
+		calibrationDistortionCoefficients[0, 0] = 0.0199f;
+		calibrationDistortionCoefficients[1, 0] = 0.032143f;
+		calibrationDistortionCoefficients[2, 0] = 0.0f;
+		calibrationDistortionCoefficients[3, 0] = 0.0f;
+		calibrationDistortionCoefficients[4, 0] = -0.22585f;
 	}
 
-	void SetCameraProperties(Matrix<float> calibration, Matrix<float> rotation, Matrix<float> translation, Matrix4x4 projection, Matrix4x4 modelview)
+	private void SetCameraProperties(Matrix<float> calibration, Matrix<float> rotation, Matrix<float> translation)
 	{
+		Matrix4x4 modelview = new Matrix4x4();
+		Matrix4x4 projection = new Matrix4x4();
+
 		float zNear = Camera.main.nearClipPlane;
 		float zFar = Camera.main.farClipPlane;
 
@@ -149,112 +176,58 @@ public class ChessboardDetection : MonoBehaviour
 		modelview.m23 = translation[2, 0];
 		modelview.m33 = 1;
 
-		// This matrix corresponds to the change of coordinate systems.
-		///static double changeCoordArray[4][4] = {{1, 0, 0, 0}, {0, -1, 0, 0}, {0, 0, -1, 0}, {0, 0, 0, 1}};
-		//static Mat changeCoord(4, 4, CV_64FC1, changeCoordArray);
-		//modelview = changeCoord* modelview;
-
 		Vector3 t = ExtractTranslation(modelview);
 		Vector3 s = ExtractScale(modelview);
 		Quaternion r = ExtractRotation(modelview, s);
 
 		Camera.main.transform.position = t;
-		Camera.main.transform.localScale = s;
-		Camera.main.transform.rotation = r;
+		Camera.main.projectionMatrix = projection;
+		//Camera.main.transform.localScale = s;
+		//Camera.main.transform.rotation = r;
 	}
 
-	void FindCameraProperties(Mat image, Mat result)
+	private void FindCameraProperties(Mat image, Mat result)
 	{
-		Matrix<float> realCorners = new Matrix<float>(patternSize);
-
-		// Try to find the chess board corners in the image.
-		bool foundCorners = CvInvoke.FindChessboardCorners(image, patternSize, realCorners);
-
-		// If we weren't able to find the corners exit early.
+		PointF[] corners = new PointF[patternSize.Width * patternSize.Height];
+		bool foundCorners = FindChessboardCorners(image, result, corners);
 		if (!foundCorners)
 			return;
 
-		CvInvoke.DrawChessboardCorners(result, patternSize, realCorners, true);
-
-		Matrix4x4 modelview = new Matrix4x4();
-		Matrix4x4 projection = new Matrix4x4();
-		VectorOfPoint3D32F virtualCorners = new VectorOfPoint3D32F(); // The corresponding corner positions for where the corners lie on the chess board (measured in virtual units).
-		Mat rotation = new Mat(4, 4, DepthType.Default, 1);        // The calculated rotation of the chess board.
-		Matrix<float> translation = new Matrix<float>(4, 4);  // The calculated translation of the chess board.
-
+		// Virtual Corners
+		MCvPoint3D32f[] virtualCorners = new MCvPoint3D32f[corners.Length];
 		BuildVirtualCorners(virtualCorners, 2);
 
+		// Calibration matrices : Intrinsec parameters
 		Matrix<float> calibrationMatrix = new Matrix<float>(new Size(3, 3));
 		Matrix<float> calibrationDistortionCoefficients = new Matrix<float>(new Size(1, 5));
+		GetCalibrationMatrices(calibrationMatrix, calibrationDistortionCoefficients);
 
-		//   1.2306403943428504e+03 0. 960. 
-		//   0. 1.2306403943428504e+03 540. 
-		//   0. 0. 1.
-		calibrationMatrix[0, 0] = 1230;
-		calibrationMatrix[0, 1] = 0.0f;
-		calibrationMatrix[0, 2] = 960;
-
-		calibrationMatrix[1, 0] = 0.0f;
-		calibrationMatrix[1, 1] = 1230;
-		calibrationMatrix[1, 2] = 540;
-
-		calibrationMatrix[2, 0] = 0.0f;
-		calibrationMatrix[2, 1] = 0.0f;
-		calibrationMatrix[2, 2] = 1;
-
-		// 1.9920531921963049e-02 3.2143454945024297e-02 0. 0. -2.2585645769105978e-01
-		calibrationDistortionCoefficients[0, 0] = 0.0199f;
-		calibrationDistortionCoefficients[1, 0] = 0.032143f;
-		calibrationDistortionCoefficients[2, 0] = 0.0f;
-		calibrationDistortionCoefficients[3, 0] = 0.0f;
-		calibrationDistortionCoefficients[4, 0] = -0.22585f;
+		// Rotation & Translation
+		float[] rotationData = new float[3 * 3];
+		float[] translationData = new float[3];
+		GCHandle handleR = GCHandle.Alloc(rotationData, GCHandleType.Pinned);
+		GCHandle handleT = GCHandle.Alloc(translationData, GCHandleType.Pinned);
+		
+		Matrix<float> translation	= new Matrix<float>(translationData.Length, 1, 2, handleT.AddrOfPinnedObject(), 2 * sizeof(float));
+		Matrix<float> rotation		= new Matrix<float>(rotationData.Length, 1, 2, handleR.AddrOfPinnedObject(), 2 * sizeof(float));
 
 		// Compute the rotation / translation of the chessboard (the cameras extrinsic pramaters).
-		CvInvoke.SolvePnP(virtualCorners, realCorners, calibrationMatrix, calibrationDistortionCoefficients, rotation, translation);
+		CvInvoke.SolvePnP(virtualCorners, corners, calibrationMatrix, calibrationDistortionCoefficients, rotation, translation);
 
 		// Converte the rotation from 3 axis rotations into a rotation matrix.
 		Matrix<float> rotationMatrix = new Matrix<float>(4, 4);
 		CvInvoke.Rodrigues(rotation, rotationMatrix);
-
-		// The tranlation corresponds to the origin, which is at the corner of the chess board
-		// but I would like to define the origin so that it is at the center of the chess board
-		// so I need to offset by half of the size of the chessboard and need to multiply it by
-		// the rotation so that it is in the local coordinate system of the chessboard.
-		// double offsetA[3][1] = {{(chessCornersX-1.0)/2.0}, {(chessCornersY-1.0)/2.0}, {0}};
-		// Mat offset = new Mat(3, 1, DepthType.Cv64F, 1);
 
 		Matrix<float> t = new Matrix<float>(4, 4);
 		CvInvoke.Add(translation, rotation, t);
 		translation = t;
 
 		// Turn the intrinsic and extrinsic pramaters into the projection and modelview matrix for OpenGL to use.
-		SetCameraProperties(calibrationMatrix, rotationMatrix, translation, projection, modelview);
+		SetCameraProperties(calibrationMatrix, rotationMatrix, translation);
 
-		//return ai;
+		handleR.Free();
+		handleT.Free();
 	}
-
-	/** En français : on init les coordonnées des corners du chestboard virtuels
-    * @brief Constructs a matrix which holds all of the corner points of the chessboard.
-    * @param corners The list of all the corners.
-    * @param scale The scale of the chess board corners (i.e. 1 square = how many units).
-    *
-    * The corners are ordered column at at time (as opposed to row at at time),
-    * ie. column 1 then column 2 etc.
-    */
-	void BuildVirtualCorners(VectorOfPoint3D32F corners, float scale)
-	{
-		MCvPoint3D32f[] tmp = new MCvPoint3D32f[patternSize.Height * patternSize.Width];
-		if (corners != null)
-		{
-			for (int ix = 0; ix < patternSize.Width; ix++)
-			{
-				for (int iy = 0; iy < patternSize.Height; iy++)
-					tmp[iy * patternSize.Width + ix] = new MCvPoint3D32f(iy * scale, ix * scale, 0);
-			}
-		}
-		corners.Push(tmp);
-	}
-
 
 	private Vector3 ExtractScale(Matrix4x4 modelView)
 	{
