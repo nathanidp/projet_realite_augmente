@@ -1,2 +1,11 @@
 rea_aug/Assets/Plugins
 rea_aug/Library
+.vs/
+*.dll
+*.lib
+Library/
+Temp/
+Builds/
+Tests/
+*.csproj
+*.sln
