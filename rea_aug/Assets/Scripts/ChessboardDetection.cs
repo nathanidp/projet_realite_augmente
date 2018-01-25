@@ -85,22 +85,26 @@ public class ChessboardDetection : MonoBehaviour
 	{
 		cornerPointImage = new Matrix<float>(patternSize.Width * patternSize.Height, 1, 2);
 		bool found = CvInvoke.FindChessboardCorners(detectImage, patternSize, cornerPointImage);
-		if (found)
-			CvInvoke.DrawChessboardCorners(drawImage, patternSize, cornerPointImage, found);
+        if (found)
+            CvInvoke.DrawChessboardCorners(drawImage, patternSize, cornerPointImage, found);
+        else
+            return false;
 		return found;
 	}
 
 	private void BuildVirtualCorners(float scale)
 	{
-		for (int iy = 0; iy < patternSize.Height; iy++)
+
+
+        for (int iy = 0; iy < patternSize.Height; iy++)
 		{
 			for (int ix = 0; ix < patternSize.Width; ix++)
 			{
 				int index = iy * patternSize.Width + ix;
-				virtualCorners.Data[index, 0] = iy * scale;
-				virtualCorners.Data[index, 1] = ix * scale;
-				virtualCorners.Data[index, 2] = 0;
-			}
+                virtualCorners.Data[index, 0] = iy * scale;
+                virtualCorners.Data[index, 1] = ix * scale;
+                virtualCorners.Data[index, 2] = 0;
+            }
 		}
 	}
 
@@ -109,24 +113,25 @@ public class ChessboardDetection : MonoBehaviour
 		//   1.2306403943428504e+03 0. 960. 
 		//   0. 1.2306403943428504e+03 540. 
 		//   0. 0. 1.
-		calibrationMatrix[0, 0] = 1230;
+		calibrationMatrix[0, 0] = 1.2306403943428504e+03f;
 		calibrationMatrix[0, 1] = 0.0f;
-		calibrationMatrix[0, 2] = 960;
+		calibrationMatrix[0, 2] = webcamTexture.width / 2.0f;
 
-		calibrationMatrix[1, 0] = 0.0f;
-		calibrationMatrix[1, 1] = 1230;
-		calibrationMatrix[1, 2] = 540;
+        calibrationMatrix[1, 0] = 0.0f;
+		calibrationMatrix[1, 1] = 1.2306403943428504e+03f;
+        calibrationMatrix[1, 2] = webcamTexture.height / 2.0f;
 
-		calibrationMatrix[2, 0] = 0.0f;
+
+        calibrationMatrix[2, 0] = 0.0f;
 		calibrationMatrix[2, 1] = 0.0f;
 		calibrationMatrix[2, 2] = 1;
 
 		// 1.9920531921963049e-02 3.2143454945024297e-02 0. 0. -2.2585645769105978e-01
-		calibrationDistortionCoefficients[0, 0] = 0.0199f;
-		calibrationDistortionCoefficients[0, 1] = 0.032143f;
-		calibrationDistortionCoefficients[0, 2] = 0.0f;
-		calibrationDistortionCoefficients[0, 3] = 0.0f;
-		calibrationDistortionCoefficients[0, 4] = -0.22585f;
+		calibrationDistortionCoefficients[0, 0] = 1.9920531921963049e-02f;
+		calibrationDistortionCoefficients[1, 0] = 3.2143454945024297e-02f;
+		calibrationDistortionCoefficients[2, 0] = 0.0f;
+		calibrationDistortionCoefficients[3, 0] = 0.0f;
+		//calibrationDistortionCoefficients[0, 4] = -0.22585f;
 	}
 
 	private void SetCameraProperties(Matrix<float> calibration, float[] rotation, float[] translation)
@@ -137,28 +142,32 @@ public class ChessboardDetection : MonoBehaviour
 		float zNear = Camera.main.nearClipPlane;
 		float zFar = Camera.main.farClipPlane;
 
-		projection.m00 = 2 * calibration[0, 0] / 960;
+		projection.m00 = 2 * calibration[0, 0] / webcamTexture.width;
 		projection.m10 = 0;
 		projection.m20 = 0;
 		projection.m30 = 0;
 
 		projection.m01 = 0;
-		projection.m11 = 2 * calibration[1, 1] / 540;
+		projection.m11 = 2 * calibration[1, 1] / webcamTexture.height;
 		projection.m21 = 0;
 		projection.m31 = 0;
 
-		projection.m02 = 1 - 2 * calibration[0, 2] / 960;
-		projection.m12 = -1 + (2 * calibration[1, 2] + 2) / 540;
+		projection.m02 = 1 - 2 * calibration[0, 2] / webcamTexture.width;
+		projection.m12 = -1 + (2 * calibration[1, 2] + 2) / webcamTexture.height;
 		projection.m22 = (zNear + zFar) / (zNear - zFar);
 		projection.m32 = -1;
 
 		projection.m03 = 0;
 		projection.m13 = 0;
-		projection.m23 = 2 * zNear * zFar / (zNear - zFar);
+		projection.m23 = 2 * (zNear * zFar) / (zNear - zFar);
 		projection.m33 = 0;
 
+        Camera.main.projectionMatrix = projection;
+        Camera.main.fieldOfView = Mathf.Atan(1.0f / projection.m11) * 2.0f * Mathf.Rad2Deg;
+        Camera.main.aspect = webcamTexture.width / webcamTexture.height;
 
-		modelview.m00 = rotation[0 * 3];
+
+        modelview.m00 = rotation[0 * 3];
 		modelview.m10 = rotation[1 * 3];
 		modelview.m20 = rotation[2 * 3];
 		modelview.m30 = 0;
@@ -174,17 +183,19 @@ public class ChessboardDetection : MonoBehaviour
 		modelview.m32 = 0;
 
 		modelview.m03 = translation[0];
-		modelview.m13 = translation[2];
-		modelview.m23 = translation[1];
+		modelview.m13 = translation[1];
+		modelview.m23 = translation[2];
 		modelview.m33 = 1;
+
+        modelview = modelview.inverse;
 
 		Vector3 t = ExtractTranslation(modelview);
 		Debug.Log(t);
-		//Quaternion r = ExtractRotation(modelview);
+		Quaternion r = ExtractRotation(modelview);
 
 		//Camera.main.transform.rotation = r;
 		Camera.main.transform.position = t;
-		Camera.main.projectionMatrix = projection;
+        Camera.main.transform.rotation = r;
 	}
 
 	private void FindCameraProperties(Mat image, Mat result)
@@ -199,7 +210,7 @@ public class ChessboardDetection : MonoBehaviour
 		
 		// Calibration matrices : Intrinsec parameters
 		Matrix<float> calibrationMat = new Matrix<float>(new Size(3, 3));
-		Matrix<float> distortionCoefs = new Matrix<float>(new Size(5, 1));
+		Matrix<float> distortionCoefs = new Matrix<float>(new Size(1, 4));
 		GetCalibrationMatrices(calibrationMat, distortionCoefs);
 
 		// Rotation & Translation
@@ -207,12 +218,23 @@ public class ChessboardDetection : MonoBehaviour
 		Mat transVector = new Mat(3, 1, DepthType.Cv64F, 1);
 
 		// Compute the rotation / translation of the chessboard (the cameras extrinsic pramaters).
-		if (CvInvoke.SolvePnP(virtualCorners, cornerPointImage, calibrationMat, distortionCoefs, rotVector, transVector) == false)
+		if (CvInvoke.SolvePnP(virtualCorners, cornerPointImage, calibrationMat, distortionCoefs, rotVector, transVector) == false) { 
 			Debug.Log("SolvePNP : false");
+            return;
+        }
 
-		// Converte the rotation from 3 axis rotations into a rotation matrix.
-		Mat rotationMatrix = new Mat(3, 3, DepthType.Cv64F, 1);
-		CvInvoke.Rodrigues(rotVector, rotationMatrix);
+        // Converte the rotation from 3 axis rotations into a rotation matrix.
+
+        float[] tempRotationData = new float[3];
+        Marshal.Copy(rotVector.DataPointer, tempRotationData, 0, rotVector.Width * rotVector.Height);
+        tempRotationData[0] = tempRotationData[0];
+        tempRotationData[1] = -tempRotationData[1];
+        tempRotationData[2] = -tempRotationData[2];
+        GCHandle tempHandle = GCHandle.Alloc(tempRotationData, GCHandleType.Pinned);
+        rotVector = new Mat(3, 1, DepthType.Cv64F, 1, tempHandle.AddrOfPinnedObject(), sizeof(double));
+
+        Mat rotationMatrix = new Mat(3, 3, DepthType.Cv64F, 1);
+        CvInvoke.Rodrigues(rotVector, rotationMatrix);
 
 		float[] rotationData = new float[9];
 		Marshal.Copy(rotationMatrix.DataPointer, rotationData, 0, rotationMatrix.Width * rotationMatrix.Height);
@@ -235,12 +257,12 @@ public class ChessboardDetection : MonoBehaviour
 	{
 		Vector3 forward;
 		forward.x = modelView.m02;
-		forward.y = modelView.m12;
+		forward.y = -modelView.m12;
 		forward.z = modelView.m22;
 
 		Vector3 up;
 		up.x = modelView.m01;
-		up.y = modelView.m11;
+		up.y = -modelView.m11;
 		up.z = modelView.m21;
 
 		return Quaternion.LookRotation(forward, up);
@@ -250,7 +272,7 @@ public class ChessboardDetection : MonoBehaviour
 	{
 		Vector3 position;
 		position.x = modelView.m03;
-		position.y = modelView.m13;
+		position.y = -modelView.m13;
 		position.z = modelView.m23;
 		return position;
 	}
