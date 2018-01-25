@@ -1,279 +1,287 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using UnityEngine;
+using UnityEngine.UI;
 using System.Drawing;
 using Emgu.CV;
-using Emgu.CV.Util;
 using Emgu.CV.CvEnum;
-using Emgu.CV.Structure;
+
+
+[System.Serializable]
+public class CamExtrinsicParam
+{
+	public double[] rotationData;
+	public double[] translationData;
+}
 
 public class ChessboardDetection : MonoBehaviour
 {
-	public static WebCamTexture webcamTexture;
+	private static WebCamTexture webcamTexture;
 	private static Texture2D displayTexture;
 
-	public GameObject screen;
-	public GameObject virtual_chessboard;
+	[Header("Parameters")]
+	public RawImage canvasImageDisplay;
+	public GameObject virtualChessboard;
+	public int patternWidth = 7;
+	public int patternHeight = 4;
 
-	private FlipType flip = FlipType.Horizontal;
-	private Size patternSize = new Size(7, 4);
+	// All computation matrices
+	private Matrix<float> imageCorners;
+	private Matrix<double> virtualCorners;
+	private Matrix<double> intrinsicMatrix;
+	private Matrix<double> distortionMatrix;
 
-	private Color32[] data;
-	private byte[] bytes;
-	private byte[] grayBytes;
+	// Intermediary Matrices & Handles & Data arrays
+	private Mat currentWebcamMat;
+	private Color32[] currentWebcamData;
+	private GCHandle currentWebcamHandle;
 
-	Matrix<float> cornerPointImage;
-	Matrix<float> virtualCorners;
+	private Mat webcamModifiedMat;
+	private byte[] webcamModifedData;
+	private GCHandle webcamModifiedHandle;
 
-	void Start()
+	private Mat webcamGrayMat;
+	private byte[] webcamGrayData;
+	private GCHandle webcamGrayHandle;
+
+
+	private void Start()
 	{
+		// Get webcam device & display
 		WebCamDevice[] devices = WebCamTexture.devices;
 		int cameraCount = devices.Length;
-
 		if (cameraCount > 0)
 		{
 			webcamTexture = new WebCamTexture(devices[0].name);
 			webcamTexture.Play();
 		}
+
+		// Construct virtual corner points
+		Vector2 offset = new Vector2(patternWidth / 2.0f, patternHeight / 2.0f);
+		virtualCorners = new Matrix<double>(patternHeight * patternWidth, 1, 3);
+		for (int iy = 0; iy < patternHeight; iy++)
+		{
+			for (int ix = 0; ix < patternWidth; ix++)
+			{
+				virtualCorners.Data[iy * patternWidth + ix, 0] = ix - offset.x;
+				virtualCorners.Data[iy * patternWidth + ix, 1] = iy - offset.y;
+				virtualCorners.Data[iy * patternWidth + ix, 2] = 0;
+			}
+		}
+
+		// Initialize intrinsic parameters
+		intrinsicMatrix = new Matrix<double>(3, 3, 1);
+		intrinsicMatrix[0, 0] = 1.2306403943428504e+03f;
+		intrinsicMatrix[0, 1] = 0;
+		intrinsicMatrix[0, 2] = webcamTexture.width / 2.0d;
+		intrinsicMatrix[1, 0] = 0;
+		intrinsicMatrix[1, 1] = 1.2306403943428504e+03f;
+		intrinsicMatrix[1, 2] = webcamTexture.height / 2.0d;
+		intrinsicMatrix[2, 0] = 0;
+		intrinsicMatrix[2, 1] = 0;
+		intrinsicMatrix[2, 2] = 1;
+
+		distortionMatrix = new Matrix<double>(4, 1, 1);
+		distortionMatrix[0, 0] = 1.9920531921963049e-02f;
+		distortionMatrix[1, 0] = 3.2143454945024297e-02f;
+		distortionMatrix[2, 0] = 0.0f;
+		distortionMatrix[3, 0] = 0.0f;
 	}
 
-	void Update()
+	private void Update()
 	{
 		if (webcamTexture != null && webcamTexture.didUpdateThisFrame)
 		{
-			if (data == null || (data.Length != webcamTexture.width * webcamTexture.height))
-				data = new Color32[webcamTexture.width * webcamTexture.height];
+			// Update new data from webcam device
+			UpdateWebcamBegin();
 
-			webcamTexture.GetPixels32(data);
+			// Detect & Draw chessboard corners
+			bool detected = FindAndDrawChessboardCorners(webcamGrayMat, webcamModifiedMat);
+			if (detected == true && Input.GetKey(KeyCode.D))
+			{
+				// If detected, update camera transform accordingly
+				CamExtrinsicParam camParams = GetExtrinsicParameters();
+				UpdateCameraTransform(camParams);
+			}
 
-			if (bytes == null || bytes.Length != data.Length * 3)
-				bytes = new byte[data.Length * 3];
-			if (grayBytes == null || grayBytes.Length != data.Length * 1)
-				grayBytes = new byte[data.Length * 1];
-
-			// OPENCV PROCESSING
-			GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
-			GCHandle resultHandle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
-			GCHandle grayHandle = GCHandle.Alloc(grayBytes, GCHandleType.Pinned);
-
-			Mat currentWebcamMat = new Mat(new Size(webcamTexture.width, webcamTexture.height), DepthType.Cv8U, 4, handle.AddrOfPinnedObject(), webcamTexture.width * 4);
-			Mat resultMat = new Mat(webcamTexture.height, webcamTexture.width, DepthType.Cv8U, 3, resultHandle.AddrOfPinnedObject(), webcamTexture.width * 3);
-			Mat grayMat = new Mat(webcamTexture.height, webcamTexture.width, DepthType.Cv8U, 1, grayHandle.AddrOfPinnedObject(), webcamTexture.width * 1);
-
-			CvInvoke.CvtColor(currentWebcamMat, resultMat, ColorConversion.Bgra2Bgr);
-			CvInvoke.CvtColor(resultMat, grayMat, ColorConversion.Bgra2Gray);
-
-			if (Input.GetKey(KeyCode.D))
-				FindCameraProperties(grayMat, resultMat); //FindCameraProperties(grayMat, resultMat);
-
-			handle.Free();
-			resultHandle.Free();
-			grayHandle.Free();
-
-			if (flip != FlipType.None)
-				CvInvoke.Flip(resultMat, resultMat, flip);
-			if (displayTexture == null || displayTexture.width != webcamTexture.width || displayTexture.height != webcamTexture.height)
-				displayTexture = new Texture2D(webcamTexture.width, webcamTexture.height, TextureFormat.RGB24, false);
-			displayTexture.LoadRawTextureData(bytes);
-			displayTexture.Apply();
+			// Apply modified data to webcam (image with corners detected)
+			UpdateWebcamEnd();
 		}
 
 		if (displayTexture != null)
-			screen.GetComponent<MeshRenderer>().sharedMaterial.SetTexture("_MainTex", displayTexture);
+			canvasImageDisplay.texture = displayTexture;
 	}
 
-	private bool FindChessboardCorners(Mat detectImage, Mat drawImage)
+
+	/* Webcam Functions */
+	private void UpdateWebcamBegin()
 	{
-		cornerPointImage = new Matrix<float>(patternSize.Width * patternSize.Height, 1, 2);
-		bool found = CvInvoke.FindChessboardCorners(detectImage, patternSize, cornerPointImage);
-        if (found)
-            CvInvoke.DrawChessboardCorners(drawImage, patternSize, cornerPointImage, found);
-        else
-            return false;
+		if (currentWebcamData == null || (currentWebcamData.Length != webcamTexture.width * webcamTexture.height))
+			currentWebcamData = new Color32[webcamTexture.width * webcamTexture.height];
+		webcamTexture.GetPixels32(currentWebcamData);
+		if (webcamModifedData == null || webcamModifedData.Length != currentWebcamData.Length * 3)
+			webcamModifedData = new byte[currentWebcamData.Length * 3];
+		if (webcamGrayData == null || webcamGrayData.Length != currentWebcamData.Length * 1)
+			webcamGrayData = new byte[currentWebcamData.Length * 1];
+
+		currentWebcamHandle = GCHandle.Alloc(currentWebcamData, GCHandleType.Pinned);
+		webcamModifiedHandle = GCHandle.Alloc(webcamModifedData, GCHandleType.Pinned);
+		webcamGrayHandle = GCHandle.Alloc(webcamGrayData, GCHandleType.Pinned);
+
+		currentWebcamMat = new Mat(new Size(webcamTexture.width, webcamTexture.height), DepthType.Cv8U, 4, currentWebcamHandle.AddrOfPinnedObject(), webcamTexture.width * 4);
+		webcamModifiedMat = new Mat(webcamTexture.height, webcamTexture.width, DepthType.Cv8U, 3, webcamModifiedHandle.AddrOfPinnedObject(), webcamTexture.width * 3);
+		webcamGrayMat = new Mat(webcamTexture.height, webcamTexture.width, DepthType.Cv8U, 1, webcamGrayHandle.AddrOfPinnedObject(), webcamTexture.width * 1);
+
+		CvInvoke.CvtColor(currentWebcamMat, webcamModifiedMat, ColorConversion.Bgra2Bgr);
+		CvInvoke.CvtColor(webcamModifiedMat, webcamGrayMat, ColorConversion.Bgra2Gray);
+	}
+
+	private void UpdateWebcamEnd()
+	{
+		currentWebcamHandle.Free();
+		webcamModifiedHandle.Free();
+		webcamGrayHandle.Free();
+
+		if (displayTexture == null || displayTexture.width != webcamTexture.width || displayTexture.height != webcamTexture.height)
+			displayTexture = new Texture2D(webcamTexture.width, webcamTexture.height, TextureFormat.RGB24, false);
+		displayTexture.LoadRawTextureData(webcamModifedData);
+		displayTexture.Apply();
+	}
+
+
+	/* Camera Functions */
+	private bool FindAndDrawChessboardCorners(Mat detectImage, Mat drawImage)
+	{
+		imageCorners = new Matrix<float>(patternWidth * patternHeight, 1, 2);
+		bool found = CvInvoke.FindChessboardCorners(detectImage, new Size(patternWidth, patternHeight), imageCorners);
+		if (found)
+			CvInvoke.DrawChessboardCorners(drawImage, new Size(patternWidth, patternHeight), imageCorners, found);
 		return found;
 	}
 
-	private void BuildVirtualCorners(float scale)
+	private CamExtrinsicParam GetExtrinsicParameters()
 	{
-
-
-        for (int iy = 0; iy < patternSize.Height; iy++)
+		// Compute camera extrinsic parameters : rotation & translation matrices.
+		Mat rotationMat = new Mat(3, 1, DepthType.Cv64F, 1);
+		Mat translationMat = new Mat(3, 1, DepthType.Cv64F, 1);
+		bool res = CvInvoke.SolvePnP(virtualCorners, imageCorners, intrinsicMatrix, distortionMatrix, rotationMat, translationMat);
+		if (res == false)
 		{
-			for (int ix = 0; ix < patternSize.Width; ix++)
-			{
-				int index = iy * patternSize.Width + ix;
-                virtualCorners.Data[index, 0] = iy * scale;
-                virtualCorners.Data[index, 1] = ix * scale;
-                virtualCorners.Data[index, 2] = 0;
-            }
+			Debug.Log("SolvePnP Failed!");
+			return null;
 		}
+
+		// Convert the rotation from 3 axis rotations into a rotation matrix.
+		double[] tempRotationData = new double[3];
+		Marshal.Copy(rotationMat.DataPointer, tempRotationData, 0, rotationMat.Width * rotationMat.Height);
+		tempRotationData[0] = tempRotationData[0];
+		tempRotationData[1] = -tempRotationData[1];
+		tempRotationData[2] = -tempRotationData[2];
+		GCHandle tempHandle = GCHandle.Alloc(tempRotationData, GCHandleType.Pinned);
+
+		// Final rotation matrix with Rodrigues function.
+		rotationMat = new Mat(3, 1, DepthType.Cv64F, 1, tempHandle.AddrOfPinnedObject(), sizeof(double));
+		Mat finalRotationMat = new Mat(3, 3, DepthType.Cv64F, 1);
+		CvInvoke.Rodrigues(rotationMat, finalRotationMat);
+
+
+		// Get all data to set Camera transform.
+		double[] rotationData = new double[9];
+		Marshal.Copy(finalRotationMat.DataPointer, rotationData, 0, finalRotationMat.Width * finalRotationMat.Height);
+		double[] translationData = new double[3];
+		Marshal.Copy(translationMat.DataPointer, translationData, 0, translationMat.Width * translationMat.Height);
+
+
+		// Return data.
+		CamExtrinsicParam ret = new CamExtrinsicParam();
+		ret.rotationData = rotationData;
+		ret.translationData = translationData;
+		return ret;
 	}
 
-	private void GetCalibrationMatrices(Matrix<float> calibrationMatrix, Matrix<float> calibrationDistortionCoefficients)
+	private void UpdateCameraTransform(CamExtrinsicParam camParams)
 	{
-		//   1.2306403943428504e+03 0. 960. 
-		//   0. 1.2306403943428504e+03 540. 
-		//   0. 0. 1.
-		calibrationMatrix[0, 0] = 1.2306403943428504e+03f;
-		calibrationMatrix[0, 1] = 0.0f;
-		calibrationMatrix[0, 2] = webcamTexture.width / 2.0f;
-
-        calibrationMatrix[1, 0] = 0.0f;
-		calibrationMatrix[1, 1] = 1.2306403943428504e+03f;
-        calibrationMatrix[1, 2] = webcamTexture.height / 2.0f;
+		double[] extrinsicRotation = camParams.rotationData;
+		double[] extrinsicTranslat = camParams.translationData;
 
 
-        calibrationMatrix[2, 0] = 0.0f;
-		calibrationMatrix[2, 1] = 0.0f;
-		calibrationMatrix[2, 2] = 1;
-
-		// 1.9920531921963049e-02 3.2143454945024297e-02 0. 0. -2.2585645769105978e-01
-		calibrationDistortionCoefficients[0, 0] = 1.9920531921963049e-02f;
-		calibrationDistortionCoefficients[1, 0] = 3.2143454945024297e-02f;
-		calibrationDistortionCoefficients[2, 0] = 0.0f;
-		calibrationDistortionCoefficients[3, 0] = 0.0f;
-		//calibrationDistortionCoefficients[0, 4] = -0.22585f;
-	}
-
-	private void SetCameraProperties(Matrix<float> calibration, float[] rotation, float[] translation)
-	{
-		Matrix4x4 modelview = new Matrix4x4();
+		// Projection matrix
 		Matrix4x4 projection = new Matrix4x4();
-
-		float zNear = Camera.main.nearClipPlane;
-		float zFar = Camera.main.farClipPlane;
-
-		projection.m00 = 2 * calibration[0, 0] / webcamTexture.width;
+		projection.m00 = (float)(2 * intrinsicMatrix[0, 0] / webcamTexture.width);
 		projection.m10 = 0;
 		projection.m20 = 0;
 		projection.m30 = 0;
 
 		projection.m01 = 0;
-		projection.m11 = 2 * calibration[1, 1] / webcamTexture.height;
+		projection.m11 = (float)(2 * intrinsicMatrix[1, 1] / webcamTexture.height);
 		projection.m21 = 0;
 		projection.m31 = 0;
 
-		projection.m02 = 1 - 2 * calibration[0, 2] / webcamTexture.width;
-		projection.m12 = -1 + (2 * calibration[1, 2] + 2) / webcamTexture.height;
-		projection.m22 = (zNear + zFar) / (zNear - zFar);
+		projection.m02 = (float)(1 - 2 * intrinsicMatrix[0, 2] / webcamTexture.width);
+		projection.m12 = (float)(-1 + (2 * intrinsicMatrix[1, 2] + 2) / webcamTexture.height);
+		projection.m22 = (Camera.main.nearClipPlane + Camera.main.farClipPlane) / (Camera.main.nearClipPlane - Camera.main.farClipPlane);
 		projection.m32 = -1;
 
 		projection.m03 = 0;
 		projection.m13 = 0;
-		projection.m23 = 2 * (zNear * zFar) / (zNear - zFar);
+		projection.m23 = 2 * (Camera.main.nearClipPlane * Camera.main.farClipPlane) / (Camera.main.nearClipPlane - Camera.main.farClipPlane);
 		projection.m33 = 0;
 
-        Camera.main.projectionMatrix = projection;
-        Camera.main.fieldOfView = Mathf.Atan(1.0f / projection.m11) * 2.0f * Mathf.Rad2Deg;
-        Camera.main.aspect = webcamTexture.width / webcamTexture.height;
+		Camera.main.projectionMatrix = projection;
+		Camera.main.fieldOfView = Mathf.Atan(1.0f / projection.m11) * 2.0f * Mathf.Rad2Deg;
+		Camera.main.aspect = webcamTexture.width / webcamTexture.height;
 
 
-        modelview.m00 = rotation[0 * 3];
-		modelview.m10 = rotation[1 * 3];
-		modelview.m20 = rotation[2 * 3];
-		modelview.m30 = 0;
+		// Model view matrix
+		Matrix4x4 modelViewMatrix = new Matrix4x4();
+		modelViewMatrix.m00 = (float)extrinsicRotation[0];
+		modelViewMatrix.m10 = (float)extrinsicRotation[3];
+		modelViewMatrix.m20 = (float)extrinsicRotation[6];
+		modelViewMatrix.m30 = 0;
 
-		modelview.m01 = rotation[0 * 3 + 1];
-		modelview.m11 = rotation[1 * 3 + 1];
-		modelview.m21 = rotation[2 * 3 + 1];
-		modelview.m31 = 0;
+		modelViewMatrix.m01 = (float)extrinsicRotation[1];
+		modelViewMatrix.m11 = (float)extrinsicRotation[4];
+		modelViewMatrix.m21 = (float)extrinsicRotation[7];
+		modelViewMatrix.m31 = 0;
 
-		modelview.m02 = rotation[0 * 3 + 2];
-		modelview.m12 = rotation[1 * 3 + 2];
-		modelview.m22 = rotation[2 * 3 + 2];
-		modelview.m32 = 0;
+		modelViewMatrix.m02 = (float)extrinsicRotation[2];
+		modelViewMatrix.m12 = (float)extrinsicRotation[5];
+		modelViewMatrix.m22 = (float)extrinsicRotation[8];
+		modelViewMatrix.m32 = 0;
 
-		modelview.m03 = translation[0];
-		modelview.m13 = translation[1];
-		modelview.m23 = translation[2];
-		modelview.m33 = 1;
+		modelViewMatrix.m03 = (float)extrinsicTranslat[0];
+		modelViewMatrix.m13 = (float)extrinsicTranslat[1];
+		modelViewMatrix.m23 = (float)extrinsicTranslat[2];
+		modelViewMatrix.m33 = 1;
+		modelViewMatrix = modelViewMatrix.inverse;
 
-        modelview = modelview.inverse;
 
-		Vector3 t = ExtractTranslation(modelview);
-		Debug.Log(t);
-		Quaternion r = ExtractRotation(modelview);
-
-		//Camera.main.transform.rotation = r;
-		Camera.main.transform.position = t;
-        Camera.main.transform.rotation = r;
+		// Update unity camera transform
+		Camera.main.transform.position = GetPositionFromModelView(modelViewMatrix);
+		Camera.main.transform.rotation = GetRotationFromModelView(modelViewMatrix);
 	}
 
-	private void FindCameraProperties(Mat image, Mat result)
-	{
-		bool foundCorners = FindChessboardCorners(image, result);
-		if (!foundCorners)
-			return;
 
-		// Virtual Corners
-		virtualCorners = new Matrix<float>(patternSize.Height * patternSize.Width, 1, 3);
-		BuildVirtualCorners(1);
-		
-		// Calibration matrices : Intrinsec parameters
-		Matrix<float> calibrationMat = new Matrix<float>(new Size(3, 3));
-		Matrix<float> distortionCoefs = new Matrix<float>(new Size(1, 4));
-		GetCalibrationMatrices(calibrationMat, distortionCoefs);
-
-		// Rotation & Translation
-		Mat rotVector = new Mat(3, 1, DepthType.Cv64F, 1);
-		Mat transVector = new Mat(3, 1, DepthType.Cv64F, 1);
-
-		// Compute the rotation / translation of the chessboard (the cameras extrinsic pramaters).
-		if (CvInvoke.SolvePnP(virtualCorners, cornerPointImage, calibrationMat, distortionCoefs, rotVector, transVector) == false) { 
-			Debug.Log("SolvePNP : false");
-            return;
-        }
-
-        // Converte the rotation from 3 axis rotations into a rotation matrix.
-
-        float[] tempRotationData = new float[3];
-        Marshal.Copy(rotVector.DataPointer, tempRotationData, 0, rotVector.Width * rotVector.Height);
-        tempRotationData[0] = tempRotationData[0];
-        tempRotationData[1] = -tempRotationData[1];
-        tempRotationData[2] = -tempRotationData[2];
-        GCHandle tempHandle = GCHandle.Alloc(tempRotationData, GCHandleType.Pinned);
-        rotVector = new Mat(3, 1, DepthType.Cv64F, 1, tempHandle.AddrOfPinnedObject(), sizeof(double));
-
-        Mat rotationMatrix = new Mat(3, 3, DepthType.Cv64F, 1);
-        CvInvoke.Rodrigues(rotVector, rotationMatrix);
-
-		float[] rotationData = new float[9];
-		Marshal.Copy(rotationMatrix.DataPointer, rotationData, 0, rotationMatrix.Width * rotationMatrix.Height);
-		float[] translationData = new float[3];
-		Marshal.Copy(transVector.DataPointer, translationData, 0, transVector.Width * transVector.Height);
-
-		// Turn the intrinsic and extrinsic pramaters into the projection and modelview matrix for OpenGL to use.
-		SetCameraProperties(calibrationMat, rotationData, translationData);
-	}
-
-	private Vector3 ExtractScale(Matrix4x4 modelView)
-	{
-		Vector3 a = new Vector3(modelView.m00, modelView.m10, modelView.m20);
-		Vector3 b = new Vector3(modelView.m10, modelView.m11, modelView.m12);
-		Vector3 c = new Vector3(modelView.m20, modelView.m21, modelView.m22);
-		return new Vector3(a.magnitude, b.magnitude, c.magnitude);
-	}
-
-	private Quaternion ExtractRotation(Matrix4x4 modelView)
+	private Quaternion GetRotationFromModelView(Matrix4x4 modelViewMatrix)
 	{
 		Vector3 forward;
-		forward.x = modelView.m02;
-		forward.y = -modelView.m12;
-		forward.z = modelView.m22;
+		forward.x = modelViewMatrix.m02;
+		forward.y = -modelViewMatrix.m12;
+		forward.z = modelViewMatrix.m22;
 
-		Vector3 up;
-		up.x = modelView.m01;
-		up.y = -modelView.m11;
-		up.z = modelView.m21;
+		Vector3 upwards;
+		upwards.x = modelViewMatrix.m01;
+		upwards.y = -modelViewMatrix.m11;
+		upwards.z = modelViewMatrix.m21;
 
-		return Quaternion.LookRotation(forward, up);
+		return Quaternion.LookRotation(forward, upwards);
 	}
 
-	private Vector3 ExtractTranslation(Matrix4x4 modelView)
+	private Vector3 GetPositionFromModelView(Matrix4x4 modelViewMatrix)
 	{
 		Vector3 position;
-		position.x = modelView.m03;
-		position.y = -modelView.m13;
-		position.z = modelView.m23;
+		position.x = modelViewMatrix.m03;
+		position.y = -modelViewMatrix.m13;
+		position.z = modelViewMatrix.m23;
 		return position;
 	}
 }
